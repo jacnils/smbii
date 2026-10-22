@@ -1,0 +1,3 @@
+- Add Wii Mini support (don't assume we store things on the SD card)
+- Add auto-updating
+- Add downloading themes from the internet

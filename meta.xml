@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+    <name>SMBii</name>
+    <coder>Jacob Nilsson</coder>
+    <version>1.0.1</version>
+    <release_date>20261022000000</release_date>
+    <short_description>SMB server for the Nintendo Wii</short_description>
+    <long_description>This homebrew application sets up an SMB server on your network, allowing you to read/write files on your Wii's SD card, NAND or USB ports. You can also install the channel to the Wii menu for easy access.</long_description>
+    <arguments>
+        <arg>--from-hbc</arg>
+    </arguments>
+    <ahb_access/>
+    <no_ios_reload/>
+</app>
