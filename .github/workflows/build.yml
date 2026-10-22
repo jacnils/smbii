@@ -1,0 +1,43 @@
+  name: Build
+
+  on:
+    push:
+      branches: [main, master]
+    pull_request:
+    workflow_dispatch:
+
+  jobs:
+    build:
+      runs-on: ubuntu-latest
+      container: devkitpro/devkitppc:latest
+
+      steps:
+        - name: Check out repository
+          uses: actions/checkout@v4
+
+        - name: Install build dependencies
+          shell: bash
+          run: |
+            set -e
+            
+            apt-get update
+            apt-get install -y cmake python3 python3-pip python3-venv
+            
+            dkp-pacman -S --noconfirm --needed \
+            ppc-libjpeg-turbo \
+            ppc-libbrotli \
+            ppc-libvorbis
+
+        - name: Build and package
+          shell: bash
+          run: |
+            chmod +x ./wiimake.sh
+            ./wiimake.sh
+
+        - name: Upload release archive
+          uses: actions/upload-artifact@v4
+          with:
+            name: smbii
+            path: build/smbii.tar.gz
+            if-no-files-found: error
+            compression-level: 0
