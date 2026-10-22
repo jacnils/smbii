@@ -1106,7 +1106,6 @@ private:
 
         if (nand)
             text(242, 380, "The NAND is always shared read-only", 13, col::warn);
-        
         if (is_usb_path(draft_root_)) {
             const bool ready = usb::available();
             text(242, 380, ready ? "USB drive ready" : "No USB drive detected", 13, ready ? col::ok : col::warn);
@@ -1578,10 +1577,7 @@ private:
         if (on_apply)
             on_apply(cfg);
 
-        msg_ = "Applied. Changes will be made when SMBii restarts";
-
-        if (!saved)
-            msg_ += " (could not write settings.ini)";
+        msg_ = "Applied.";
 
         msg_ok_ = saved;
     }
