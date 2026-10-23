@@ -2,9 +2,11 @@
 
 # smbii
 
+[YouTube Showcase](https://www.youtube.com/watch?v=tPuPYIQweBo) [Themes](https://github.com/jacnils/smbii-themes)
+
 SMB server for the Nintendo Wii/vWii, written in C++
 
-This SMB server supports read/write access to the SD card, USB ports and NAND of your Wii, over the network. 
+This SMB server supports read/write access to the SD card, USB ports and NAND of your Wii, over the network.
 
 ## Usage
 
