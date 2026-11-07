@@ -24,7 +24,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-inline constexpr const char* themes_dir = "sd:/apps/smbii/themes";
+#include "paths.hpp"
 
 struct palette_t {
     uint32_t bg      = 0x0E1620FF;
@@ -238,38 +238,68 @@ inline bool parse_theme_ini(const std::string& path, theme_info& info, palette_t
 }
 
 inline std::string theme_path(const std::string& dir, const char* file) {
-    return std::string(themes_dir) + "/" + dir + "/" + file;
+    for (const auto& root : paths::themes_dirs()) {
+        const std::string base = root + "/" + dir;
+
+        if (paths::detail::is_dir(base))
+            return base + "/" + file;
+    }
+
+    return paths::data_dir() + "/themes/" + dir + "/" + file;
 }
 
 inline std::vector<theme_info> scan_themes() {
     std::vector<theme_info> found;
 
-    if (DIR* d = opendir(themes_dir)) {
+    for (const auto& root : paths::themes_dirs()) {
+        DIR* d = opendir(root.c_str());
+
+        if (!d)
+            continue;
+
         while (dirent* e = readdir(d)) {
             const std::string name = e->d_name;
             if (name == "." || name == "..") continue;
 
+            bool dup = false;
+
+            for (const auto& f : found)
+                if (f.dir == name) {
+                    dup = true;
+                    break;
+                }
+
+            if (dup)
+                continue;
+
             struct stat sb;
-            const std::string base = std::string(themes_dir) + "/" + name;
-            if (stat(base.c_str(), &sb) != 0 || !S_ISDIR(sb.st_mode)) continue;
+
+            const std::string base = root + "/" + name;
+
+            if (stat(base.c_str(), &sb) != 0 || !S_ISDIR(sb.st_mode))
+                continue;
 
             theme_info t;
+
             t.dir = name;
+
             palette_t unused_pal;
             style_t unused_style;
-            if (!parse_theme_ini(base + "/theme.ini", t, unused_pal, unused_style)) continue;
-            if (t.name.empty()) t.name = name;
+
+            if (!parse_theme_ini(base + "/theme.ini", t, unused_pal, unused_style))
+                continue;
+
+            if (t.name.empty())
+                t.name = name;
+
             found.push_back(std::move(t));
         }
+
         closedir(d);
     }
 
     std::sort(found.begin(), found.end(),
               [](const theme_info& a, const theme_info& b) { return a.dir < b.dir; });
 
-    std::vector<theme_info> out;
-
-    out.insert(out.end(), found.begin(), found.end());
-
-    return out;
+    return found;
 }

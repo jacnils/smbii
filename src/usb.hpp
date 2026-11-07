@@ -84,6 +84,16 @@ inline bool available() {
     return detail::mounted;
 }
 
+inline bool wait_mounted(unsigned timeout_ms) {
+    if (!detail::running)
+        return detail::mounted;
+
+    for (unsigned waited = 0; !detail::mounted && waited < timeout_ms; waited += 50)
+        usleep(50 * 1000);
+
+    return detail::mounted;
+}
+
 inline void shutdown() {
     using namespace detail;
 

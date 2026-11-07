@@ -19,9 +19,8 @@
 
 #include "credentials.hpp"
 #include "nand_fs.hpp"
+#include "paths.hpp"
 #include "usb.hpp"
-
-inline constexpr const char* config_path = "sd:/apps/smbii/settings.ini";
 
 struct settings_t {
     int port{445};
@@ -64,7 +63,7 @@ inline bool is_ro(const settings_t& s) {
 inline settings_t load_settings() {
     settings_t s;
 
-    std::ifstream f(config_path);
+    std::ifstream f(paths::config_path());
 
     for (std::string line; std::getline(f, line);) {
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
@@ -102,7 +101,7 @@ inline settings_t load_settings() {
 }
 
 inline bool save_settings(const settings_t& s) {
-    std::ofstream f(config_path, std::ios::trunc);
+    std::ofstream f(paths::config_path(), std::ios::trunc);
 
     if (!f)
         return false;

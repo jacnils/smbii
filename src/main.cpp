@@ -214,8 +214,6 @@ static int fatal(const char* msg) {
     }
 }
 
-// is this even correct?
-// idk but it seems to work on my wii and wii u
 bool patch_ios() {
     const bool iospatch_ok = false;
     bool vwii_patch = true;
@@ -246,6 +244,7 @@ int main(int argc, char** argv) {
     fatInitDefault();
 
     usb::begin();
+    paths::init(argc, argv);
 
     const bool nand_ok = nand::mount();
 
@@ -253,20 +252,32 @@ int main(int argc, char** argv) {
 
     settings_t cfg = load_settings();
 
+    if (is_usb_path(cfg.share_root.string()) && !usb::available())
+        usb::wait_mounted(5000);
+
     std::error_code ec;
     bool root_reset = false;
+
     if (!std::filesystem::is_directory(cfg.share_root, ec)) {
-        cfg.share_root = ".";
         root_reset = true;
+
+        if (std::filesystem::is_directory("sd:/", ec))
+            cfg.share_root = "sd:/";
+        else if (usb::available() && std::filesystem::is_directory("usb:/", ec))
+            cfg.share_root = "usb:/";
+        else
+            cfg.share_root = ".";
     }
+
     if (!std::filesystem::is_directory(cfg.share_root, ec)) {
-        return fatal("share root is not a directory, do you have an SD card inserted?");
+        return fatal("share root is not a directory, do you have an SD card or USB drive inserted?");
     }
+
     gui::st.cfg = cfg;
 
     gui::ui ui;
     if (!ui.init()) {
-        std::string msg = "could not start the GUI, do you have a theme on the SD card?";
+        std::string msg = "could not start the GUI, do you have a theme in apps/smbii/themes on the SD card or USB drive?";
         return fatal(msg.c_str());
     }
 

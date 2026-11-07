@@ -1061,7 +1061,7 @@ private:
         text(30, 18, "Settings", 40, col::accent);
         text(30, 62, "Change how SMBii operates", 16, col::dim);
 
-        if (field(30, 88,  262, "Root folder on the SD card", draft_root_))
+        if (field(30, 88,  262, "Root folder", draft_root_))
             open_keyboard(0, "Root folder", draft_root_, false, 64);
 
         if (button(298, 110, 82, 38, "Browse"))
