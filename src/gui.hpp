@@ -1104,13 +1104,6 @@ private:
             scr_ = screen::login;
         }
 
-        if (nand)
-            text(242, 380, "The NAND is always shared read-only", 13, col::warn);
-        if (is_usb_path(draft_root_)) {
-            const bool ready = usb::available();
-            text(242, 380, ready ? "USB drive ready" : "No USB drive detected", 13, ready ? col::ok : col::warn);
-        }
-
         if (!msg_.empty())
             text(30, 380, fit(msg_, 16, 580), 16, msg_ok_ ? col::ok : col::warn);
         else if (s.listening)
