@@ -1,5 +1,7 @@
 ![Logo](icon.png)
 
+[![Build](https://github.com/jacnils/smbii/actions/workflows/build.yml/badge.svg)](https://github.com/jacnils/smbii/actions/workflows/build.yml)
+
 # smbii
 
 SMB server for the Nintendo Wii/vWii, written in C++
