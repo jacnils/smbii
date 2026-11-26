@@ -15,6 +15,8 @@
 #include <grrlib.h>
 #include <wiiuse/wpad.h>
 #include <ogc/mutex.h>
+#include <ogc/pad.h>
+#include <climits>
 
 #include <algorithm>
 #include <cctype>
@@ -139,6 +141,8 @@ public:
         if (GRRLIB_Init() != 0)
             return false;
 
+        PAD_Init();
+
         font_ = GRRLIB_LoadTTF(ttf_.data(), static_cast<s32>(ttf_.size()));
         if (!font_) {
             GRRLIB_Exit();
@@ -160,6 +164,9 @@ public:
     }
 
     void shutdown() {
+        for (int ch = 0; ch < 4; ++ch)
+            PAD_ControlMotor(ch, PAD_MOTOR_STOP);
+
         snd_.shutdown();
         wad_.shutdown();
 
@@ -184,12 +191,8 @@ public:
             apply_pending_theme();
         }
 
-        WPAD_ScanPads();
-        WPAD_IR(0, &ir_);
-        
-        pressed_ = WPAD_ButtonsDown(0);
-        held_ = WPAD_ButtonsHeld(0);
-        
+        poll_input();
+
         ++tick_;
 
         state_t s;
@@ -229,6 +232,8 @@ public:
             prompt_ = false;
 
         locked_ = prompt_ || kb_.open || picker_.open || confirm_.open || browser_.open || wad_busy;
+
+        nav_begin(wad_st);
         
         if (scr_ == screen::main) 
             draw_main(s);
@@ -262,16 +267,24 @@ public:
 
         draw_cursor();
 
+        nav_end();
+
         if (hot_key_ && hot_key_ != prev_hot_key_) {
             play(sfx_id::hover);
 
-            WPAD_Rumble(WPAD_CHAN_0, true);
-            usleep(15'000);
-            WPAD_Rumble(WPAD_CHAN_0, false);
+            if (gc_used_) {
+                gc_rumble_ = 3;   // non-blocking, a few frames
+            } else {
+                WPAD_Rumble(WPAD_CHAN_0, true);
+                usleep(15'000);
+                WPAD_Rumble(WPAD_CHAN_0, false);
+            }
         }
-        
+
         prev_hot_key_ = hot_key_;
         hot_key_ = 0;
+
+        update_gc_rumble();
 
         GRRLIB_Render();
         
@@ -337,6 +350,316 @@ private:
     keyboard_t kb_;
     picker_t picker_;
     int bs_hold_{};
+
+        // ---------- unified input (Wiimote + GameCube) ----------
+    struct nav_rect { int x, y, w, h; };
+
+    static constexpr uint32_t dpad_mask =
+        WPAD_BUTTON_UP | WPAD_BUTTON_DOWN | WPAD_BUTTON_LEFT | WPAD_BUTTON_RIGHT;
+
+    std::vector<nav_rect> nav_, prev_nav_;   // widgets registered this / last frame
+    nav_rect focus_{};
+    bool has_focus_{};
+    bool nav_active_{};                      // true = D-pad focus mode, false = pointer mode
+    bool dpad_pressed_{};
+    uint32_t layer_{~0u};
+
+    enum class ptr_src { ir, pad };
+    ptr_src ptr_src_{ptr_src::ir};
+    float ptr_x_{320}, ptr_y_{240};          // virtual cursor (stick)
+    float anchor_x_{}, anchor_y_{};
+    bool anchor_ok_{};
+
+    float cstick_y_{};
+    bool gc_used_{};
+    int gc_chan_{};
+    int gc_rumble_{};
+    bool gc_rumble_on_{};
+    int scroll_hold_{};
+
+    static uint32_t map_gc(uint32_t b) {
+        struct pair { uint32_t gc, wpad; };
+        static const pair map[] = {
+            {PAD_BUTTON_A,     WPAD_BUTTON_A},
+            {PAD_BUTTON_B,     WPAD_BUTTON_B},
+            {PAD_BUTTON_START, WPAD_BUTTON_HOME},
+            {PAD_BUTTON_X,     WPAD_BUTTON_PLUS},
+            {PAD_BUTTON_Y,     WPAD_BUTTON_MINUS},
+            {PAD_TRIGGER_Z,    WPAD_BUTTON_1},
+            {PAD_BUTTON_UP,    WPAD_BUTTON_UP},
+            {PAD_BUTTON_DOWN,  WPAD_BUTTON_DOWN},
+            {PAD_BUTTON_LEFT,  WPAD_BUTTON_LEFT},
+            {PAD_BUTTON_RIGHT, WPAD_BUTTON_RIGHT},
+        };
+
+        uint32_t out = 0;
+        for (const pair& m : map)
+            if (b & m.gc)
+                out |= m.wpad;
+
+        return out;
+    }
+
+    // dead zone + curve; returns -1..1
+    static float stick_axis(int v) {
+        constexpr int dead = 16, full = 70;
+        const int a = std::abs(v);
+
+        if (a <= dead)
+            return 0.0f;
+
+        float n = std::min(1.0f, static_cast<float>(a - dead) / (full - dead));
+        n *= n;   // finer control near the centre
+
+        return v < 0 ? -n : n;
+    }
+
+    void poll_input() {
+        WPAD_ScanPads();
+        WPAD_IR(0, &ir_);
+
+        pressed_ = WPAD_ButtonsDown(0);
+        held_ = WPAD_ButtonsHeld(0);
+
+        if (pressed_)
+            gc_used_ = false;
+
+        PAD_ScanPads();
+
+        float ax = 0, ay = 0, cy = 0;
+
+        for (int ch = 0; ch < 4; ++ch) {
+            const uint32_t down = map_gc(PAD_ButtonsDown(ch));
+            const uint32_t held = map_gc(PAD_ButtonsHeld(ch));
+            const float sx = stick_axis(PAD_StickX(ch));
+            const float sy = stick_axis(PAD_StickY(ch));
+            const float cs = stick_axis(PAD_SubStickY(ch));
+
+            if (down || held || sx != 0 || sy != 0 || cs != 0) {
+                gc_used_ = true;
+                gc_chan_ = ch;
+            }
+
+            pressed_ |= down;
+            held_ |= held;
+
+            if (std::fabs(sx) > std::fabs(ax)) ax = sx;
+            if (std::fabs(sy) > std::fabs(ay)) ay = sy;
+            if (std::fabs(cs) > std::fabs(cy)) cy = cs;
+        }
+
+        cstick_y_ = cy;
+        dpad_pressed_ = (pressed_ & dpad_mask) != 0;
+
+        arbitrate_pointer(ax, -ay);   // stick up is positive, screen y goes down
+    }
+
+    void arbitrate_pointer(float ax, float ay) {
+        const bool stick = ax != 0.0f || ay != 0.0f;
+
+        const bool ir_away = ir_.valid &&
+            (!anchor_ok_ || std::fabs(ir_.x - anchor_x_) > 8.0f || std::fabs(ir_.y - anchor_y_) > 8.0f);
+
+        auto set_anchor = [&] {
+            anchor_ok_ = ir_.valid;
+            anchor_x_ = ir_.x;
+            anchor_y_ = ir_.y;
+        };
+
+        if (stick) {
+            if (ptr_src_ == ptr_src::ir && ir_.valid) {   // take over without a jump
+                ptr_x_ = ir_.x;
+                ptr_y_ = ir_.y;
+            }
+
+            ptr_src_ = ptr_src::pad;
+            nav_active_ = false;
+            set_anchor();
+
+            constexpr float speed = 10.0f;   // px per frame at full tilt
+            ptr_x_ = std::max(0.0f, std::min(639.0f, ptr_x_ + ax * speed));
+            ptr_y_ = std::max(0.0f, std::min(479.0f, ptr_y_ + ay * speed));
+        } else if (dpad_pressed_) {
+            nav_active_ = true;
+            set_anchor();
+        } else if (ir_away && (nav_active_ || ptr_src_ == ptr_src::pad)) {
+            nav_active_ = false;
+            ptr_src_ = ptr_src::ir;
+        }
+    }
+
+    bool  ptr_valid() const { return ptr_src_ == ptr_src::pad || ir_.valid; }
+    float ptr_x() const     { return ptr_src_ == ptr_src::pad ? ptr_x_ : ir_.x; }
+    float ptr_y() const     { return ptr_src_ == ptr_src::pad ? ptr_y_ : ir_.y; }
+
+    void update_gc_rumble() {
+        if (gc_rumble_ > 0) {
+            PAD_ControlMotor(gc_chan_, PAD_MOTOR_RUMBLE);
+            --gc_rumble_;
+            gc_rumble_on_ = true;
+        } else if (gc_rumble_on_) {
+            PAD_ControlMotor(gc_chan_, PAD_MOTOR_STOP);
+            gc_rumble_on_ = false;
+        }
+    }
+
+    // C-stick list scrolling: one step on tilt, then auto-repeat
+    int scroll_step() {
+        const int dir = cstick_y_ > 0.35f ? -1 : (cstick_y_ < -0.35f ? 1 : 0);
+
+        if (!dir) {
+            scroll_hold_ = 0;
+            return 0;
+        }
+
+        ++scroll_hold_;
+        return (scroll_hold_ == 1 || (scroll_hold_ > 18 && scroll_hold_ % 5 == 0)) ? dir : 0;
+    }
+
+    // ---------- focus navigation ----------
+    static bool same(const nav_rect& a, const nav_rect& b) {
+        return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+    }
+
+    static int span_gap(int a, int al, int b, int bl) {
+        return std::max(0, std::max(a, b) - std::min(a + al, b + bl));
+    }
+
+    void reset_focus() { has_focus_ = false; }
+
+    uint32_t layer_id(const wad::installer::status_t& w) const {
+        return static_cast<uint32_t>(scr_)
+             | (prompt_ ? 1u << 4 : 0u) | (kb_.open ? 1u << 5 : 0u)
+             | (picker_.open ? 1u << 6 : 0u) | (confirm_.open ? 1u << 7 : 0u)
+             | (browser_.open ? 1u << 8 : 0u)
+             | (static_cast<uint32_t>(w.phase) << 9);
+    }
+
+    void nav_begin(const wad::installer::status_t& w) {
+        prev_nav_.swap(nav_);
+        nav_.clear();
+
+        const uint32_t layer = layer_id(w);
+        if (layer != layer_) {       // screen/overlay changed: old widgets are gone
+            layer_ = layer;
+            prev_nav_.clear();
+            has_focus_ = false;
+        }
+
+        if (nav_active_ && dpad_pressed_) {
+            int dx = 0, dy = 0;
+            if (pressed_ & WPAD_BUTTON_LEFT)  dx = -1;
+            if (pressed_ & WPAD_BUTTON_RIGHT) dx = 1;
+            if (pressed_ & WPAD_BUTTON_UP)    dy = -1;
+            if (pressed_ & WPAD_BUTTON_DOWN)  dy = 1;
+
+            if (dx && dy)   // diagonal on the same frame: prefer vertical
+                dx = 0;
+
+            nav_move(dx, dy);
+        }
+    }
+
+    void nav_end() {
+        if (!nav_active_ || nav_.empty())
+            return;
+
+        if (has_focus_)
+            for (const nav_rect& r : nav_)
+                if (same(r, focus_))
+                    return;
+
+        focus_ = nav_.front();   // nothing valid focused: grab the first widget
+        has_focus_ = true;
+    }
+
+    // Lists only show a few rows, so Up/Down on the first/last row scrolls instead of leaving the list.
+    bool nav_scroll_edge(int dy, const nav_rect& f) {
+        if (!dy)
+            return false;
+
+        auto edge = [&](int x, int w, int y0, int rows, int& top, int n) {
+            if (f.x != x || f.w != w || f.y < y0 || f.y >= y0 + rows * 36)
+                return false;
+
+            const int row = (f.y - y0) / 36;
+
+            if (dy > 0 && row == rows - 1 && top + rows < n) { ++top; return true; }
+            if (dy < 0 && row == 0 && top > 0)               { --top; return true; }
+
+            return false;
+        };
+
+        if (browser_.open)
+            return edge(44, 552, 100, browser_rows, browser_.top, static_cast<int>(browser_.items.size()));
+        if (picker_.open)
+            return edge(44, 244, 84, picker_rows, picker_.top, static_cast<int>(picker_.items.size()));
+
+        return false;
+    }
+
+    void nav_move(int dx, int dy) {
+        if (prev_nav_.empty() || (!dx && !dy))
+            return;
+
+        int cur = -1;
+        if (has_focus_)
+            for (size_t i = 0; i < prev_nav_.size(); ++i)
+                if (same(prev_nav_[i], focus_)) { cur = static_cast<int>(i); break; }
+
+        if (cur < 0) {   // first press: focus whatever is under the cursor, else the first widget
+            cur = 0;
+
+            if (ptr_valid())
+                for (size_t i = 0; i < prev_nav_.size(); ++i) {
+                    const nav_rect& r = prev_nav_[i];
+                    if (ptr_x() >= r.x && ptr_x() < r.x + r.w && ptr_y() >= r.y && ptr_y() < r.y + r.h) {
+                        cur = static_cast<int>(i);
+                        break;
+                    }
+                }
+
+            focus_ = prev_nav_[cur];
+            has_focus_ = true;
+            return;
+        }
+
+        const nav_rect f = prev_nav_[cur];
+
+        if (nav_scroll_edge(dy, f))
+            return;
+
+        const int fcx = f.x + f.w / 2, fcy = f.y + f.h / 2;
+
+        int best = -1, best_score = INT_MAX;
+        int wrap = -1, wrap_score = INT_MAX;
+
+        for (int i = 0; i < static_cast<int>(prev_nav_.size()); ++i) {
+            if (i == cur)
+                continue;
+
+            const nav_rect& r = prev_nav_[i];
+            const int ddx = (r.x + r.w / 2) - fcx;
+            const int ddy = (r.y + r.h / 2) - fcy;
+
+            const int along = ddx * dx + ddy * dy;                       // >0 = in the pressed direction
+            const int off   = std::abs(dx ? ddy : ddx);                  // sideways offset of centres
+            const int gap   = dx ? span_gap(f.y, f.h, r.y, r.h)
+                                 : span_gap(f.x, f.w, r.x, r.w);         // 0 when they overlap
+
+            if (along > 0) {
+                const int score = along + gap * 4 + off / 2;
+                if (score < best_score) { best_score = score; best = i; }
+            } else {
+                const int score = gap * 4 + off / 2 + along;             // farthest on the opposite side wins
+                if (score < wrap_score) { wrap_score = score; wrap = i; }
+            }
+        }
+
+        const int pick = best >= 0 ? best : wrap;
+        if (pick >= 0)
+            focus_ = prev_nav_[pick];
+    }
 
     struct browse_entry { std::string label; std::string path; };
     struct browser_t {
@@ -912,8 +1235,16 @@ private:
         rounded(x, y, w, h, button_radius(), fill, border, style_.border);
     }
 
-    bool hovering(int x, int y, int w, int h) const {
-        return !locked_ && ir_.valid && ir_.x >= x && ir_.x < x + w && ir_.y >= y && ir_.y < y + h;
+    bool hovering(int x, int y, int w, int h) {
+        if (locked_)
+            return false;
+
+        nav_.push_back({x, y, w, h});
+
+        if (nav_active_)
+            return has_focus_ && same(focus_, {x, y, w, h});
+
+        return ptr_valid() && ptr_x() >= x && ptr_x() < x + w && ptr_y() >= y && ptr_y() < y + h;
     }
 
     bool button(int x, int y, int w, int h, const char* label, bool primary = false, bool enabled = true, sfx_id snd = sfx_id::click) {
@@ -1039,7 +1370,7 @@ private:
         if (hot)
             note_hover(x, by, w);
 
-        box(x, by, w, bh, col::panel, hot ? col::accent : col::border);
+        box(x, by, w, bh, hot ? col::accent : col::panel, hot ? col::accent : col::border);
 
         std::string shown = value;
 
@@ -1122,8 +1453,13 @@ private:
 
         if (button(350, 418, 120, 30, "Apply", true))
             apply(s);
-        if (button(490, 418, 120, 30, "Back", false, true, sfx_id::back))
+        if (button(490, 418, 120, 30, "Back", false, true, sfx_id::back) ||
+            (!locked_ && (pressed_ & WPAD_BUTTON_B))) {
+            if (!locked_ && (pressed_ & WPAD_BUTTON_B))
+                play(sfx_id::back);   // the button already plays its own sound
+
             scr_ = screen::main;
+            }
     }
 
     void enter_credits() {
@@ -1186,8 +1522,20 @@ private:
         if (!locked_) {
             bool manual = false;
 
-            if (held_ & WPAD_BUTTON_UP)   { credits_scroll_ -= 140.0f * dt / 1000.0f; manual = true; }
-            if (held_ & WPAD_BUTTON_DOWN) { credits_scroll_ += 140.0f * dt / 1000.0f; manual = true; }
+            if (held_ & WPAD_BUTTON_UP) {
+                credits_scroll_ -= 140.0f * dt / 1000.0f;
+                manual = true;
+            }
+
+            if (held_ & WPAD_BUTTON_DOWN) {
+                credits_scroll_ += 140.0f * dt / 1000.0f;
+                manual = true;
+            }
+
+            if (cstick_y_ != 0.0f) {
+                credits_scroll_ -= cstick_y_ * 220.0f * dt / 1000.0f;
+                manual = true;
+            }
 
             if (manual) {
                 credits_delay_ = 3000;
@@ -1284,8 +1632,13 @@ private:
                 wad_.start_uninstall();
         }
 
-        if (button(350, 298, 120, 34, "No", false, true, sfx_id::back))
+        if (button(350, 298, 120, 34, "No", false, true, sfx_id::back) ||
+            (pressed_ & WPAD_BUTTON_B)) {
+            if (pressed_ & WPAD_BUTTON_B)
+                play(sfx_id::back);
+
             confirm_.open = false;
+            }
     }
 
     void draw_wad_status(const wad::installer::status_t& st) {
@@ -1429,11 +1782,8 @@ private:
         text(46, 48, "Choose the folder to share", 20, col::text);
         text(46, 76, fit(browser_.path.empty() ? std::string("Drives") : browser_.path, 15, 548), 15, col::accent);
 
-        if (pressed_ & WPAD_BUTTON_UP)
-            browser_scroll(-1);
-
-        if (pressed_ & WPAD_BUTTON_DOWN)
-            browser_scroll(1);
+        if (const int s = scroll_step())
+            browser_scroll(s);
 
         bool select_here = (pressed_ & WPAD_BUTTON_PLUS) && !browser_.path.empty();
 
@@ -1513,7 +1863,7 @@ private:
         }
     }
 
-        void draw_login(const state_t&) {
+    void draw_login(const state_t&) {
         draw_background();
         text(30, 18, "Login", 40, col::accent);
         text(30, 62, "Set up authentication.", 16, col::dim);
@@ -1545,8 +1895,13 @@ private:
         if (!draft_login_msg_.empty())
             text(30, 370, fit(draft_login_msg_, 16, 580), 16, draft_login_msg_ok_ ? col::ok : col::warn);
 
-        if (button(490, 418, 120, 30, "Back", false, true, sfx_id::back))
+        if (button(490, 418, 120, 30, "Back", false, true, sfx_id::back) ||
+            (!locked_ && (pressed_ & WPAD_BUTTON_B))) {
+            if (!locked_ && (pressed_ & WPAD_BUTTON_B))
+                play(sfx_id::back);
+
             scr_ = screen::settings;
+            }
     }
 
     void apply(const state_t& s) {
@@ -1631,11 +1986,10 @@ private:
         panel(30, 40, 580, 380);
         text(46, 48, "Choose a theme", 20, col::text);
 
-        if (pressed_ & WPAD_BUTTON_UP)
-            select_theme_row(picker_.sel - 1);
-
-        if (pressed_ & WPAD_BUTTON_DOWN)
-            select_theme_row(picker_.sel + 1);
+        if (const int s = scroll_step()) {
+            const int n = static_cast<int>(picker_.items.size());
+            picker_.top = std::max(0, std::min(picker_.top + s, std::max(0, n - picker_rows)));
+        }
 
         constexpr int rh = 36;
 
@@ -1649,6 +2003,9 @@ private:
 
             if (hot)
                 note_hover(44, y, 244);
+
+            if (hot && nav_active_ && dpad_pressed_)
+                select_theme_row(idx);
 
             box(44, y, 244, rh - 2, is_sel ? col::primary : col::bg, hot ? col::accent : col::border);
             text(54, y + 8, fit(picker_.items[idx].name, 18, 200), 18, col::text);
@@ -1687,7 +2044,10 @@ private:
         if (button(364, 378, 120, 32, "Use theme", true)) {
             request_theme(t.dir);
             close_picker();
-        } else if (button(490, 378, 106, 32, "Cancel", true, true, sfx_id::back)) {
+        } else if (button(490, 378, 106, 32, "Cancel", true, true, sfx_id::back) || (pressed_ & WPAD_BUTTON_B)) {
+            if (pressed_ & WPAD_BUTTON_B)
+                play(sfx_id::back);
+
             close_picker();
         }
     }
@@ -1827,14 +2187,18 @@ private:
     }
 
     void draw_cursor() {
-        if (!ir_.valid)
+        if (nav_active_ || !ptr_valid())
             return;
 
+        const int x = static_cast<int>(ptr_x());
+        const int y = static_cast<int>(ptr_y());
+
         if (cursor_) {
-            GRRLIB_DrawImg(ir_.x - cursor_->w / 2, ir_.y - cursor_->h / 2, cursor_, ir_.angle, 1, 1, 0xFFFFFFFF);
+            const float angle = ptr_src_ == ptr_src::ir ? ir_.angle : 0.0f;
+            GRRLIB_DrawImg(x - cursor_->w / 2, y - cursor_->h / 2, cursor_, angle, 1, 1, 0xFFFFFFFF);
         } else {
-            GRRLIB_Circle(ir_.x, ir_.y, 7, 0xFFFFFFFF, true);
-            GRRLIB_Circle(ir_.x, ir_.y, 4, 0x000000FF, true);
+            GRRLIB_Circle(x, y, 7, 0xFFFFFFFF, true);
+            GRRLIB_Circle(x, y, 4, 0x000000FF, true);
         }
     }
 };
